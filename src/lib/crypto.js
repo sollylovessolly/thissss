@@ -1,20 +1,21 @@
-// convert buffers to Base64
-const toBase64 = (buf) => {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
+// src/lib/crypto.js
 
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-
-  return btoa(binary);
-};
-
+const toBase64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const fromBase64 = (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
 
-export async function preparingRegistration(password) {
-  //1. Gen. RSA_OAEP Keypair
+export async function importPublicKey(base64Key) {
+  return window.crypto.subtle.importKey(
+    "spki",
+    fromBase64(base64Key),
+    { name: "RSA-OAEP", hash: "SHA-256" },
+    true,
+    ["encrypt"],
+  );
+}
+
+export async function prepareRegistration(password) {
+  const salt = window.crypto.getRandomValues(new Uint8Array(16));
+
   const keyPair = await window.crypto.subtle.generateKey(
     {
       name: "RSA-OAEP",
@@ -26,57 +27,6 @@ export async function preparingRegistration(password) {
     ["encrypt", "decrypt"],
   );
 
-  // 2. Export Public Key to Base64
-  const exportedPublic = await window.crypto.subtle.exportKey(
-    "spki",
-    keyPair.publicKey,
-  );
-
-  //setup PBKDF2 for password wrapping
-  const salt = window.crypto.getRandomValues(new Uint8Array(16));
-
-  const passwordKey = await window.crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(password),
-    "PBKDF2",
-    false,
-    ["deriveKey"],
-  );
-
-  const wrappingKey = await window.crypto.subtle.deriveKey(
-    {
-      name: "PBKDF2",
-      salt,
-      iterations: 100000,
-      hash: "SHA-256",
-    },
-    passwordKey,
-    { name: "AES-KW", length: 256 },
-    false,
-    ["wrapKey", "unwrapKey"],
-  );
-
-  // 4. Wrap the Private Key
-  const wrappedKey = await window.crypto.subtle.wrapKey(
-    "pkcs8",
-    keyPair.privateKey,
-    wrappingKey,
-    "AES-KW",
-  );
-
-  return {
-    publicKey: toBase64(exportedPublic),
-    wrappedKey: toBase64(wrappedKey),
-    salt: toBase64(salt),
-  };
-}
-
-export async function unwrapPrivateKey(password, wrappedKeyBase64, saltBase64) {
-  // 1. Convert Base64 strings back to byte arrays
-  const wrappedKeyBuffer = fromBase64(wrappedKeyBase64);
-  const salt = fromBase64(saltBase64);
-
-  // 2. Re-derive the "Wrapper Key" from the password
   const passwordKey = await window.crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(password),
@@ -88,62 +38,148 @@ export async function unwrapPrivateKey(password, wrappedKeyBase64, saltBase64) {
   const wrappingKey = await window.crypto.subtle.deriveKey(
     { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
     passwordKey,
-    { name: "AES-KW", length: 256 },
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["wrapKey", "unwrapKey"],
+  );
+
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  const wrappedBinary = await window.crypto.subtle.wrapKey(
+    "pkcs8",
+    keyPair.privateKey,
+    wrappingKey,
+    { name: "AES-GCM", iv },
+  );
+
+  const combined = new Uint8Array(iv.length + wrappedBinary.byteLength);
+  combined.set(iv);
+  combined.set(new Uint8Array(wrappedBinary), iv.length);
+
+  const exportedPublic = await window.crypto.subtle.exportKey(
+    "spki",
+    keyPair.publicKey,
+  );
+
+  return {
+    publicKey: toBase64(exportedPublic),
+    wrappedKey: toBase64(combined),
+    salt: toBase64(salt),
+    privateKey: keyPair.privateKey, // return for immediate use in session
+  };
+}
+
+export async function unwrapPrivateKey(password, wrappedKeyBase64, saltBase64) {
+  const combined = fromBase64(wrappedKeyBase64);
+  const salt = fromBase64(saltBase64);
+  const iv = combined.slice(0, 12);
+  const wrappedData = combined.slice(12);
+
+  const passwordKey = await window.crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveKey"],
+  );
+
+  const wrappingKey = await window.crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+    passwordKey,
+    { name: "AES-GCM", length: 256 },
     false,
     ["unwrapKey"],
   );
 
-  // 3. Unlock the Private Key!
-  return await window.crypto.subtle.unwrapKey(
+  return window.crypto.subtle.unwrapKey(
     "pkcs8",
-    wrappedKeyBuffer,
+    wrappedData,
     wrappingKey,
-    { name: "AES-KW" },
+    { name: "AES-GCM", iv },
     { name: "RSA-OAEP", hash: "SHA-256" },
     true,
     ["decrypt"],
   );
 }
 
-export async function generateSymmetricKey() {
-  return await window.crypto.subtle.generateKey(
-    {
-      name: "AES-GCM",
-      length: 256,
-    },
+export async function encryptHybrid(
+  plaintext,
+  recipientPublicKeyBase64,
+  ownPublicKeyBase64,
+) {
+  const aesKey = await window.crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
     true,
     ["encrypt", "decrypt"],
   );
-}
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
 
-//ENCRYPT: Turns "Hello" into a scrambled blob
-export async function encryptMessage(plaintext, key) {
-  const iv = window.crypto.getRandomValues(new Uint8Array(12)); // The "One-time" number
-  const encoded = new TextEncoder().encode(plaintext);
+  const payload = JSON.stringify({
+    v: "wb.message.v1",
+    content: {
+      kind: "text",
+      text: plaintext,
+    },
+  });
 
   const ciphertext = await window.crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv,
-    },
-    key,
-    encoded,
+    { name: "AES-GCM", iv },
+    aesKey,
+    new TextEncoder().encode(payload),
   );
+
+  const rawAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
+
+  const recipientKey = await importPublicKey(recipientPublicKeyBase64);
+  const encryptedKey = await window.crypto.subtle.encrypt(
+    { name: "RSA-OAEP" },
+    recipientKey,
+    rawAesKey,
+  );
+
+  const selfKey = await importPublicKey(ownPublicKeyBase64);
+  const encryptedKeyForSelf = await window.crypto.subtle.encrypt(
+    { name: "RSA-OAEP" },
+    selfKey,
+    rawAesKey,
+  );
+
   return {
     ciphertext: toBase64(ciphertext),
     iv: toBase64(iv),
+    encryptedKey: toBase64(encryptedKey),
+    encryptedKeyForSelf: toBase64(encryptedKeyForSelf),
   };
 }
 
-//DECRYPT: Turns the scrambled blob back into "Hello"
-export async function decryptMessage(ciphertextBase64, ivBase64, key) {
-  const ciphertext = fromBase64(ciphertextBase64);
-  const iv = fromBase64(ivBase64);
+// ✅ Fixed: isSender flag to pick the right encrypted key
+export async function decryptHybrid(payload, myPrivateKey, isSender = false) {
+  // If I sent this message, decrypt using encryptedKeyForSelf
+  // If I received it, decrypt using encryptedKey
+  const keyToDecrypt = isSender
+    ? payload.encryptedKeyForSelf
+    : payload.encryptedKey;
 
-  const decrypted = await window.crypto.subtle.decrypt(
-    { name: "AES-GCM", iv },
-    key,
-    ciphertext,
+  const rawAesKey = await window.crypto.subtle.decrypt(
+    { name: "RSA-OAEP" },
+    myPrivateKey,
+    fromBase64(keyToDecrypt),
   );
-  return new TextDecoder().decode(decrypted);
+
+  const aesKey = await window.crypto.subtle.importKey(
+    "raw",
+    rawAesKey,
+    "AES-GCM",
+    false,
+    ["decrypt"],
+  );
+
+  const decryptedBuffer = await window.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: fromBase64(payload.iv) },
+    aesKey,
+    fromBase64(payload.ciphertext),
+  );
+
+  const decoded = new TextDecoder().decode(decryptedBuffer);
+  console.log(decoded);
+  return JSON.parse(decoded);
 }
