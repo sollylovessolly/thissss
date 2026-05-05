@@ -104,3 +104,46 @@ export async function unwrapPrivateKey(password, wrappedKeyBase64, saltBase64) {
     ["decrypt"],
   );
 }
+
+export async function generateSymmetricKey() {
+  return await window.crypto.subtle.generateKey(
+    {
+      name: "AES-GCM",
+      length: 256,
+    },
+    true,
+    ["encrypt", "decrypt"],
+  );
+}
+
+//ENCRYPT: Turns "Hello" into a scrambled blob
+export async function encryptMessage(plaintext, key) {
+  const iv = window.crypto.getRandomValues(new Uint8Array(12)); // The "One-time" number
+  const encoded = new TextEncoder().encode(plaintext);
+
+  const ciphertext = await window.crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv,
+    },
+    key,
+    encoded,
+  );
+  return {
+    ciphertext: toBase64(ciphertext),
+    iv: toBase64(iv),
+  };
+}
+
+//DECRYPT: Turns the scrambled blob back into "Hello"
+export async function decryptMessage(ciphertextBase64, ivBase64, key) {
+  const ciphertext = fromBase64(ciphertextBase64);
+  const iv = fromBase64(ivBase64);
+
+  const decrypted = await window.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    key,
+    ciphertext,
+  );
+  return new TextDecoder().decode(decrypted);
+}
