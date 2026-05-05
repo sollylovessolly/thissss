@@ -1,4 +1,4 @@
-# Commugate / WhisperBox E2EE Messenger
+# Commugate E2EE Messenger
 
 Commugate is a Next.js secure messaging client built for **Frontend Wizards - Stage 4B: End-to-End Encrypted App**. The application lets users register, sign in, search for other users, and exchange encrypted chat messages through the hosted WhisperBox backend.
 
