@@ -1,11 +1,45 @@
 // src/app/chat/page.js
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useCallback, useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api } from "@/src/lib/api";
 import { createSocket } from "@/src/lib/socket";
 import { decryptHybrid } from "@/src/lib/crypto";
+
+const idsMatch = (left, right) => String(left) === String(right);
+
+function contactStorageKey(userId) {
+  return `commugate_contact_${userId}`;
+}
+
+function readStorageKey(myUserId, contactId) {
+  return `commugate_read_at_${myUserId}_${contactId}`;
+}
+
+function rememberContact(contact) {
+  if (!contact?.id && !contact?.user_id) return;
+
+  const id = contact.id || contact.user_id;
+  sessionStorage.setItem(
+    contactStorageKey(id),
+    JSON.stringify({
+      id,
+      display_name: contact.display_name,
+      username: contact.username,
+    }),
+  );
+}
+
+function getLastSenderId(conversation) {
+  return (
+    conversation.last_message_from_user_id ||
+    conversation.last_from_user_id ||
+    conversation.from_user_id ||
+    conversation.sender_id ||
+    null
+  );
+}
 
 export default function ChatDashboard() {
   const { user, myPrivateKey, logout } = useAuth();
@@ -18,21 +52,86 @@ export default function ChatDashboard() {
   const [isSearching, setIsSearching] = useState(false);
   const [loadingConvos, setLoadingConvos] = useState(true);
 
+  const enrichConversations = useCallback(async (items) => {
+    if (!user || !myPrivateKey) return Array.isArray(items) ? items : [];
+
+    return Promise.all(
+      items.map(async (convo) => {
+        const lastReadAt = localStorage.getItem(
+          readStorageKey(user.id, convo.user_id),
+        );
+        const fallbackLastSenderId = getLastSenderId(convo);
+        const fallbackHasUnread =
+          Boolean(fallbackLastSenderId && convo.last_message_at) &&
+          !idsMatch(fallbackLastSenderId, user.id) &&
+          (!lastReadAt ||
+            new Date(convo.last_message_at) > new Date(lastReadAt));
+
+        try {
+          const messages = await api.getMessages(convo.user_id);
+          const latest = Array.isArray(messages) ? messages[0] : null;
+          const latestAt = latest?.created_at || convo.last_message_at;
+          const hasUnread =
+            Boolean(latest?.from_user_id && latestAt) &&
+            !idsMatch(latest.from_user_id, user.id) &&
+            (!lastReadAt || new Date(latestAt) > new Date(lastReadAt));
+
+          if (!latest?.payload) {
+            return {
+              ...convo,
+              hasUnread: fallbackHasUnread,
+              preview: "Encrypted conversation",
+            };
+          }
+
+          const parsed = await decryptHybrid(
+            latest.payload,
+            myPrivateKey,
+            idsMatch(latest.from_user_id, user.id),
+          );
+          const text =
+            typeof parsed === "string"
+              ? parsed
+              : (parsed?.content?.text ?? "Encrypted message");
+
+          return {
+            ...convo,
+            hasUnread,
+            preview: idsMatch(latest.from_user_id, user.id)
+              ? `You: ${text}`
+              : text,
+          };
+        } catch {
+          return {
+            ...convo,
+            hasUnread: fallbackHasUnread,
+            preview: "Encrypted message",
+          };
+        }
+      }),
+    );
+  }, [user, myPrivateKey]);
+
   // Guard — redirect if not logged in
   useEffect(() => {
     if (!user || !myPrivateKey) {
       router.push("/auth");
     }
-  }, [user, myPrivateKey]);
+  }, [user, myPrivateKey, router]);
 
   // Load conversations on mount
   useEffect(() => {
-    if (!user) return;
-    api.getConversations().then((data) => {
-      setConversations(Array.isArray(data) ? data : []);
+    if (!user || !myPrivateKey) return;
+
+    const loadConversations = async () => {
+      const data = await api.getConversations();
+      const enriched = await enrichConversations(Array.isArray(data) ? data : []);
+      setConversations(enriched);
       setLoadingConvos(false);
-    });
-  }, [user]);
+    };
+
+    loadConversations();
+  }, [user, myPrivateKey, enrichConversations]);
 
   // Connect WebSocket
   useEffect(() => {
@@ -44,7 +143,10 @@ export default function ChatDashboard() {
         try {
           // Refresh conversations when new message arrives
           const updated = await api.getConversations();
-          setConversations(Array.isArray(updated) ? updated : []);
+          const enriched = await enrichConversations(
+            Array.isArray(updated) ? updated : [],
+          );
+          setConversations(enriched);
         } catch {}
       },
       onPresence: () => {},
@@ -62,12 +164,11 @@ export default function ChatDashboard() {
         socketRef.current = null;
       }
     };
-  }, [myPrivateKey]);
+  }, [myPrivateKey, enrichConversations]);
 
   // Search users with debounce
   useEffect(() => {
     if (!searchQuery.trim()) {
-      setSearchResults([]);
       return;
     }
     const timer = setTimeout(async () => {
@@ -83,6 +184,16 @@ export default function ChatDashboard() {
     }, 400);
     return () => clearTimeout(timer);
   }, [searchQuery]);
+
+  const handleSearchChange = (event) => {
+    const nextQuery = event.target.value;
+    setSearchQuery(nextQuery);
+
+    if (!nextQuery.trim()) {
+      setSearchResults([]);
+      setIsSearching(false);
+    }
+  };
 
   const formatTime = (iso) => {
     const date = new Date(iso);
@@ -138,7 +249,7 @@ export default function ChatDashboard() {
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={handleSearchChange}
               placeholder="Search users..."
               className="w-full bg-zinc-800 border border-zinc-700 rounded-xl pl-8 pr-4 py-2.5 text-white placeholder-zinc-500 focus:outline-none focus:border-violet-500 text-sm transition-colors"
             />
@@ -173,6 +284,7 @@ export default function ChatDashboard() {
                   <button
                     key={u.id}
                     onClick={() => {
+                      rememberContact(u);
                       setSearchQuery("");
                       router.push(`/chat/${u.id}`);
                     }}
@@ -224,7 +336,10 @@ export default function ChatDashboard() {
                 conversations.map((convo) => (
                   <button
                     key={convo.user_id}
-                    onClick={() => router.push(`/chat/${convo.user_id}`)}
+                    onClick={() => {
+                      rememberContact(convo);
+                      router.push(`/chat/${convo.user_id}`);
+                    }}
                     className="w-full flex items-center gap-3 px-4 py-3 hover:bg-zinc-900 transition-colors border-b border-zinc-800/50"
                   >
                     <div className="w-11 h-11 rounded-full bg-violet-600 flex items-center justify-center flex-shrink-0">
@@ -234,16 +349,27 @@ export default function ChatDashboard() {
                     </div>
                     <div className="flex-1 text-left min-w-0">
                       <div className="flex items-center justify-between">
-                        <p className="text-white text-sm font-medium">
+                        <p
+                          className={`text-sm ${convo.hasUnread ? "text-white font-bold" : "text-white font-medium"}`}
+                        >
                           {convo.display_name}
                         </p>
-                        <p className="text-zinc-500 text-xs">
+                        <p
+                          className={`text-xs ${convo.hasUnread ? "text-violet-300 font-semibold" : "text-zinc-500"}`}
+                        >
                           {formatTime(convo.last_message_at)}
                         </p>
                       </div>
-                      <p className="text-zinc-500 text-xs mt-0.5">
-                        @{convo.username}
-                      </p>
+                      <div className="mt-0.5 flex items-center gap-2">
+                        <p
+                          className={`min-w-0 flex-1 truncate text-xs ${convo.hasUnread ? "text-zinc-100 font-semibold" : "text-zinc-500"}`}
+                        >
+                          {convo.preview || `@${convo.username}`}
+                        </p>
+                        {convo.hasUnread && (
+                          <span className="h-2.5 w-2.5 rounded-full bg-violet-500 flex-shrink-0" />
+                        )}
+                      </div>
                     </div>
                   </button>
                 ))

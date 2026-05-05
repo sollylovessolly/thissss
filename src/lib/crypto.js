@@ -153,17 +153,32 @@ export async function encryptHybrid(
 
 // ✅ Fixed: isSender flag to pick the right encrypted key
 export async function decryptHybrid(payload, myPrivateKey, isSender = false) {
-  // If I sent this message, decrypt using encryptedKeyForSelf
-  // If I received it, decrypt using encryptedKey
-  const keyToDecrypt = isSender
-    ? payload.encryptedKeyForSelf
-    : payload.encryptedKey;
+  const encryptedKeyForSelf =
+    payload.encryptedKeyForSelf || payload.encrypted_key_for_self;
+  const encryptedKey = payload.encryptedKey || payload.encrypted_key;
+  const keyCandidates = isSender
+    ? [encryptedKeyForSelf, encryptedKey]
+    : [encryptedKey, encryptedKeyForSelf];
 
-  const rawAesKey = await window.crypto.subtle.decrypt(
-    { name: "RSA-OAEP" },
-    myPrivateKey,
-    fromBase64(keyToDecrypt),
-  );
+  let rawAesKey;
+  let lastError;
+
+  for (const keyToDecrypt of keyCandidates.filter(Boolean)) {
+    try {
+      rawAesKey = await window.crypto.subtle.decrypt(
+        { name: "RSA-OAEP" },
+        myPrivateKey,
+        fromBase64(keyToDecrypt),
+      );
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (!rawAesKey) {
+    throw lastError || new Error("No encrypted message key available");
+  }
 
   const aesKey = await window.crypto.subtle.importKey(
     "raw",
@@ -180,6 +195,5 @@ export async function decryptHybrid(payload, myPrivateKey, isSender = false) {
   );
 
   const decoded = new TextDecoder().decode(decryptedBuffer);
-  console.log(decoded);
   return JSON.parse(decoded);
 }

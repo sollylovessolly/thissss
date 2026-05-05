@@ -7,6 +7,27 @@ import { api } from "@/src/lib/api";
 import { createSocket } from "@/src/lib/socket";
 import { encryptHybrid, decryptHybrid } from "@/src/lib/crypto";
 
+const idsMatch = (left, right) => String(left) === String(right);
+
+function contactStorageKey(userId) {
+  return `commugate_contact_${userId}`;
+}
+
+function readStorageKey(myUserId, contactId) {
+  return `commugate_read_at_${myUserId}_${contactId}`;
+}
+
+function getStoredContactName(userId) {
+  if (typeof window === "undefined") return "";
+
+  try {
+    const stored = sessionStorage.getItem(contactStorageKey(userId));
+    return stored ? JSON.parse(stored)?.display_name || "" : "";
+  } catch {
+    return "";
+  }
+}
+
 export default function ChatPage({ params }) {
   const resolvedParams = use(params);
   const recipientId = resolvedParams.id;
@@ -19,10 +40,16 @@ export default function ChatPage({ params }) {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState("");
   const [recipientPublicKey, setRecipientPublicKey] = useState("");
-  const [recipientName, setRecipientName] = useState("");
   const [isOnline, setIsOnline] = useState(false);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const recipientName = getStoredContactName(recipientId);
+
+  useEffect(() => {
+    if (!user || !myPrivateKey) {
+      router.replace("/auth");
+    }
+  }, [user, myPrivateKey, router]);
 
   // Auto scroll
   useEffect(() => {
@@ -31,7 +58,9 @@ export default function ChatPage({ params }) {
 
   // Load recipient key + message history
   useEffect(() => {
-    if (!user || !myPrivateKey || !recipientId) return;
+    if (!user || !myPrivateKey || !recipientId) {
+      return;
+    }
 
     const init = async () => {
       setLoading(true);
@@ -42,25 +71,21 @@ export default function ChatPage({ params }) {
 
         // 2. Load message history
         const history = await api.getMessages(recipientId);
-        console.log(history);
 
         // 3. Decrypt all messages — newest first from API, reverse for display
         const decrypted = await Promise.all(
           [...history].reverse().map(async (msg) => {
-            const isSender = msg.from_user_id === user.id;
+            const isSender = idsMatch(msg.from_user_id, user.id);
             try {
               const parsed = await decryptHybrid(
                 msg.payload,
                 myPrivateKey,
                 isSender,
               );
-              console.log("ONE", parsed);
-
               const text =
                 typeof parsed === "string"
                   ? parsed
                   : (parsed?.content?.text ?? null);
-              console.log(text);
               return { ...msg, text, decryptError: false };
             } catch {
               return { ...msg, text: null, decryptError: true };
@@ -69,14 +94,11 @@ export default function ChatPage({ params }) {
         );
 
         setMessages(decrypted);
+        localStorage.setItem(
+          readStorageKey(user.id, recipientId),
+          new Date().toISOString(),
+        );
 
-        // 4. Get recipient name from first message or search
-        if (history.length > 0) {
-          const other =
-            history[0].from_user_id === user.id
-              ? history[0].to_user_id
-              : history[0].from_user_id;
-        }
       } catch (err) {
         console.error("Failed to load chat:", err);
       } finally {
@@ -96,33 +118,39 @@ export default function ChatPage({ params }) {
       onMessage: async (frame) => {
         // Only handle messages in this conversation
         if (
-          frame.from_user_id !== recipientId &&
-          frame.to_user_id !== recipientId
+          !idsMatch(frame.from_user_id, recipientId) &&
+          !idsMatch(frame.to_user_id, recipientId)
         )
           return;
 
-        const isSender = frame.from_user_id === user?.id;
+        const isSender = idsMatch(frame.from_user_id, user?.id);
         try {
           const parsed = await decryptHybrid(
             frame.payload,
             myPrivateKey,
             isSender,
           );
-          console.log("ME", parsed);
           const text =
             typeof parsed === "string"
               ? parsed
               : (parsed?.content?.text ?? null);
-          console.log(text);
           setMessages((prev) => {
             if (prev.find((m) => m.id === frame.id)) return prev;
             return [...prev, { ...frame, text, decryptError: false }];
           });
+          localStorage.setItem(
+            readStorageKey(user.id, recipientId),
+            new Date().toISOString(),
+          );
         } catch {
           setMessages((prev) => [
             ...prev,
             { ...frame, text: null, decryptError: true },
           ]);
+          localStorage.setItem(
+            readStorageKey(user.id, recipientId),
+            new Date().toISOString(),
+          );
         }
       },
       onPresence: (data) => {
@@ -281,7 +309,7 @@ export default function ChatPage({ params }) {
           </div>
         ) : (
           messages.map((msg) => {
-            const isMine = msg.from_user_id === user?.id;
+            const isMine = idsMatch(msg.from_user_id, user?.id);
             return (
               <div
                 key={msg.id}
