@@ -144,17 +144,8 @@ The app uses a hybrid encryption scheme:
 2. **AES-GCM message encryption**
    - Each outgoing message gets a fresh random AES-GCM 256-bit content key.
    - Each message gets a fresh random 96-bit IV.
-   - The plaintext is wrapped in a versioned JSON payload before encryption:
-
-```json
-{
-  "v": "wb.message.v1",
-  "content": {
-    "kind": "text",
-    "text": "message body"
-  }
-}
-```
+   - The raw message text is encrypted directly with AES-GCM before it leaves the browser.
+   - The decrypt path also tolerates older versioned JSON message bodies so previously sent messages can still render correctly.
 
 3. **RSA-OAEP key exchange**
    - The raw AES message key is encrypted with the recipient public key as `encryptedKey`.
