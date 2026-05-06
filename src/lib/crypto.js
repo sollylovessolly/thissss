@@ -142,18 +142,10 @@ export async function encryptHybrid(
   );
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
 
-  const payload = JSON.stringify({
-    v: "wb.message.v1",
-    content: {
-      kind: "text",
-      text: plaintext,
-    },
-  });
-
   const ciphertext = await window.crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
     aesKey,
-    new TextEncoder().encode(payload),
+    new TextEncoder().encode(plaintext),
   );
 
   const rawAesKey = await window.crypto.subtle.exportKey("raw", aesKey);
