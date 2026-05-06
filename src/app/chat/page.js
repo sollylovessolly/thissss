@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api } from "@/src/lib/api";
 import { createSocket } from "@/src/lib/socket";
-import { decryptHybrid } from "@/src/lib/crypto";
+import { decryptHybrid, getDecryptedMessageText } from "@/src/lib/crypto";
 
 const idsMatch = (left, right) => String(left) === String(right);
 
@@ -89,10 +89,7 @@ export default function ChatDashboard() {
             myPrivateKey,
             idsMatch(latest.from_user_id, user.id),
           );
-          const text =
-            typeof parsed === "string"
-              ? parsed
-              : (parsed?.content?.text ?? "Encrypted message");
+          const text = getDecryptedMessageText(parsed) || "Encrypted message";
 
           return {
             ...convo,

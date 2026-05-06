@@ -5,7 +5,11 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { api } from "@/src/lib/api";
 import { createSocket } from "@/src/lib/socket";
-import { encryptHybrid, decryptHybrid } from "@/src/lib/crypto";
+import {
+  encryptHybrid,
+  decryptHybrid,
+  getDecryptedMessageText,
+} from "@/src/lib/crypto";
 
 const idsMatch = (left, right) => String(left) === String(right);
 
@@ -82,10 +86,7 @@ export default function ChatPage({ params }) {
                 myPrivateKey,
                 isSender,
               );
-              const text =
-                typeof parsed === "string"
-                  ? parsed
-                  : (parsed?.content?.text ?? null);
+              const text = getDecryptedMessageText(parsed);
               return { ...msg, text, decryptError: false };
             } catch {
               return { ...msg, text: null, decryptError: true };
@@ -130,10 +131,7 @@ export default function ChatPage({ params }) {
             myPrivateKey,
             isSender,
           );
-          const text =
-            typeof parsed === "string"
-              ? parsed
-              : (parsed?.content?.text ?? null);
+          const text = getDecryptedMessageText(parsed);
           setMessages((prev) => {
             if (prev.find((m) => m.id === frame.id)) return prev;
             return [...prev, { ...frame, text, decryptError: false }];
@@ -324,9 +322,7 @@ export default function ChatPage({ params }) {
                     </p>
                   ) : (
                     <p className="text-white text-sm leading-relaxed whitespace-pre-wrap">
-                      {typeof msg.text === "string"
-                        ? msg.text
-                        : msg.text?.content?.text}
+                      {getDecryptedMessageText(msg.text)}
                     </p>
                   )}
                   <p
